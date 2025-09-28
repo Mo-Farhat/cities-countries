@@ -20,6 +20,7 @@ export default function Home() {
   const [loadingCountries, setLoadingCountries] = useState(false);
   const [loadingCities, setLoadingCities] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadingKeyCities, setLoadingKeyCities] = useState(false);
 
   useEffect(() => {
     try {
@@ -123,6 +124,34 @@ export default function Home() {
     localStorage.setItem(CITIES_KEY, JSON.stringify(next));
   };
 
+  const addKeyCities = async () => {
+    if (!selectedCountry) return;
+    setLoadingKeyCities(true);
+    setError(null);
+    try {
+      const keyCities = await fetchKeyCitiesNews(selectedCountry);
+      if (!keyCities.length) return;
+      const existing = new Set(
+        storedCities.map((s) => `${s.country}||${s.city}`)
+      );
+      const newEntries: StoredCity[] = keyCities
+        .filter((city) => !existing.has(`${selectedCountry}||${city}`))
+        .map((city) => ({ country: selectedCountry, city }));
+      if (newEntries.length === 0) return;
+      const next = [...storedCities, ...newEntries].sort((a, b) =>
+        a.country === b.country
+          ? a.city.localeCompare(b.city)
+          : a.country.localeCompare(b.country)
+      );
+      setStoredCities(next);
+      localStorage.setItem(CITIES_KEY, JSON.stringify(next));
+    } catch (e: any) {
+      setError("Failed to fetch key cities");
+    } finally {
+      setLoadingKeyCities(false);
+    }
+  };
+
   const removeCountry = (country: CountryName) => {
     const next = storedCountries.filter((c) => c !== country);
     setStoredCountries(next);
@@ -137,17 +166,29 @@ export default function Home() {
     localStorage.setItem(CITIES_KEY, JSON.stringify(next));
   };
 
+  const clearAllCountries = () => {
+    setStoredCountries([]);
+    localStorage.setItem(COUNTRIES_KEY, JSON.stringify([]));
+  };
+
+  const clearAllCities = () => {
+    setStoredCities([]);
+    localStorage.setItem(CITIES_KEY, JSON.stringify([]));
+  };
+
   const csvContent = useMemo(() => {
     const rows: string[] = [];
-    rows.push("Country,City");
+    rows.push("RegionCode,Country,City");
     storedCountries.forEach((c) =>
-      rows.push(`${escapeCSV(normalizeText(c))},`)
+      rows.push(`,${escapeCSV(normalizeText(c))},`)
     );
-    storedCities.forEach((s) =>
+    storedCities.forEach((s) => {
+      const city = normalizeText(s.city);
+      const code = getRegionCode(city);
       rows.push(
-        `${escapeCSV(normalizeText(s.country))},${escapeCSV(normalizeText(s.city))}`
-      )
-    );
+        `${escapeCSV(code)},${escapeCSV(normalizeText(s.country))},${escapeCSV(city)}`
+      );
+    });
     return rows.join("\n");
   }, [storedCountries, storedCities]);
 
@@ -240,12 +281,35 @@ export default function Home() {
           >
             Add all
           </button>
+          <button
+            className="border rounded px-3 py-2"
+            onClick={addKeyCities}
+            disabled={!selectedCountry || loadingKeyCities}
+            title={
+              !selectedCountry
+                ? "Select a country first"
+                : loadingKeyCities
+                  ? "Fetching key cities..."
+                  : "Add cities relevant in news (last 12 months)"
+            }
+          >
+            {loadingKeyCities ? "Adding…" : "Add key cities (news)"}
+          </button>
         </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div>
-          <h2 className="font-medium mb-2">Saved Countries</h2>
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="font-medium">Saved Countries</h2>
+            <button
+              className="text-sm text-red-500 disabled:opacity-50"
+              onClick={clearAllCountries}
+              disabled={storedCountries.length === 0}
+            >
+              Remove all
+            </button>
+          </div>
           <ul className="space-y-2">
             {storedCountries.length === 0 && (
               <li className="text-sm text-default-500">None yet</li>
@@ -268,7 +332,16 @@ export default function Home() {
         </div>
 
         <div>
-          <h2 className="font-medium mb-2">Saved Cities</h2>
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="font-medium">Saved Cities</h2>
+            <button
+              className="text-sm text-red-500 disabled:opacity-50"
+              onClick={clearAllCities}
+              disabled={storedCities.length === 0}
+            >
+              Remove all
+            </button>
+          </div>
           <ul className="space-y-2">
             {storedCities.length === 0 && (
               <li className="text-sm text-default-500">None yet</li>
@@ -320,6 +393,149 @@ function normalizeText(value: string) {
   } catch {
     return value;
   }
+}
+
+function getRegionCode(city: string) {
+  if (!city) return "";
+  const base = city
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase();
+  return base.slice(0, 5);
+}
+
+async function fetchKeyCitiesNews(country: string): Promise<string[]> {
+  const results = new Set<string>();
+
+  // 1) GDELT Geo API: top mentioned locations in last 12 months
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+    const url = `https://api.gdeltproject.org/api/v2/geo/geo?query=${encodeURIComponent(
+      country
+    )}&timespan=12M&format=JSON`;
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (res.ok) {
+      const data = await res.json();
+      const feats: any[] = Array.isArray(data?.features) ? data.features : [];
+      feats
+        .map((f) => ({
+          name: f?.properties?.name,
+          type: f?.properties?.type || f?.properties?.type_name,
+          count: Number(f?.properties?.count || f?.properties?.tonecount || 0),
+        }))
+        .filter((x) => x.name && /city/i.test(String(x.type)))
+        .sort((a, b) => (b.count || 0) - (a.count || 0))
+        .slice(0, 12)
+        .forEach((x) => results.add(x.name));
+    }
+  } catch {}
+
+  // 2) GDELT Doc API: timeline geo aggregation as a secondary source
+  if (results.size < 8) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 20000);
+      const url = `https://api.gdeltproject.org/api/v2/doc/doc?query=${encodeURIComponent(
+        country
+      )}&mode=TimelineGeo&timespan=12M&format=JSON`;
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.ok) {
+        const data = await res.json();
+        const timelines: any[] = Array.isArray(data?.timelines)
+          ? data.timelines
+          : Array.isArray(data?.timeline)
+            ? data.timeline
+            : [];
+        timelines.forEach((t) => {
+          const locs: any[] = Array.isArray(t?.locations) ? t.locations : [];
+          locs
+            .map((l) => ({
+              name: l?.name,
+              type: l?.type,
+              value: Number(l?.value),
+            }))
+            .filter((x) => x.name && /city/i.test(String(x.type)))
+            .sort((a, b) => (b.value || 0) - (a.value || 0))
+            .slice(0, 12)
+            .forEach((x) => results.add(x.name));
+        });
+      }
+    } catch {}
+  }
+
+  // 3) Always augment with capital and top-population; final basic fallback if empty
+  // Capital via restcountries
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    const res = await fetch(
+      `https://restcountries.com/v3.1/name/${encodeURIComponent(
+        country
+      )}?fullText=true&fields=capital`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timeout);
+    if (res.ok) {
+      const data = await res.json();
+      const caps: string[] = Array.isArray(data?.[0]?.capital)
+        ? data[0].capital
+        : [];
+      caps.forEach((c) => c && results.add(c));
+    }
+  } catch {}
+
+  // Top population via countriesnow
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+    const res = await fetch(
+      "https://countriesnow.space/api/v0.1/countries/population/cities",
+      { signal: controller.signal }
+    );
+    clearTimeout(timeout);
+    if (res.ok) {
+      const data = await res.json();
+      const rows: any[] = Array.isArray(data?.data) ? data.data : [];
+      const inCountry = rows.filter((r) => r?.country === country);
+      const withLatest = inCountry.map((r) => {
+        const counts: any[] = Array.isArray(r?.populationCounts)
+          ? r.populationCounts
+          : [];
+        const latest = counts
+          .map((c) => ({ year: Number(c?.year), value: Number(c?.value) }))
+          .filter((c) => Number.isFinite(c.year) && Number.isFinite(c.value))
+          .sort((a, b) => b.year - a.year)[0];
+        return { city: r?.city, latestPop: latest?.value ?? 0 };
+      });
+      withLatest
+        .filter((x) => x.city)
+        .sort((a, b) => b.latestPop - a.latestPop)
+        .slice(0, 10)
+        .forEach((x) => results.add(x.city));
+    }
+  } catch {}
+
+  // If still empty, fallback to first 10 cities from basic list
+  if (results.size === 0) {
+    try {
+      const res = await fetch(
+        "https://countriesnow.space/api/v0.1/countries/cities",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ country }),
+        }
+      );
+      const data = await res.json();
+      const list: string[] = Array.isArray(data?.data) ? data.data : [];
+      list.slice(0, 10).forEach((c) => c && results.add(c));
+    } catch {}
+  }
+
+  return Array.from(results);
 }
 
 async function loadCountriesWithFallback(): Promise<CountryName[]> {
