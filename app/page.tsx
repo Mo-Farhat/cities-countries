@@ -140,15 +140,22 @@ export default function Home() {
   const csvContent = useMemo(() => {
     const rows: string[] = [];
     rows.push("Country,City");
-    storedCountries.forEach((c) => rows.push(`${escapeCSV(c)},`));
+    storedCountries.forEach((c) =>
+      rows.push(`${escapeCSV(normalizeText(c))},`)
+    );
     storedCities.forEach((s) =>
-      rows.push(`${escapeCSV(s.country)},${escapeCSV(s.city)}`)
+      rows.push(
+        `${escapeCSV(normalizeText(s.country))},${escapeCSV(normalizeText(s.city))}`
+      )
     );
     return rows.join("\n");
   }, [storedCountries, storedCities]);
 
   const downloadCSV = () => {
-    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const bom = "\uFEFF"; // UTF-8 BOM for Excel
+    const blob = new Blob([bom, csvContent], {
+      type: "text/csv;charset=utf-8;",
+    });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -305,6 +312,14 @@ function escapeCSV(value: string) {
   const needsQuotes = /[",\n]/.test(value);
   const escaped = value.replace(/"/g, '""');
   return needsQuotes ? `"${escaped}"` : escaped;
+}
+
+function normalizeText(value: string) {
+  try {
+    return value.normalize("NFC");
+  } catch {
+    return value;
+  }
 }
 
 async function loadCountriesWithFallback(): Promise<CountryName[]> {
